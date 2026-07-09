@@ -8,11 +8,17 @@
 
 ### Current status
 
-This iteration did not make a pytorch source change. The local workspace does
-not currently provide a runnable torch/XPU environment for direct reproduction.
+No pytorch source change was needed on this iteration. The current checkout does
+not reproduce the report:
+
+```bash
+python test/dynamo/test_functions.py DefaultsTests.test_zip_strict
+```
+
+That command passes locally.
 
 ### Suggested follow-up
 
-Reproduce the failure in the upstream dynamo test path and inspect where the
-`ValueError` from `zip(strict=True)` is wrapped into
-`torch._dynamo.exc.Unsupported` on XPU.
+If the issue still matters, re-run it against the original release/2.13 commit
+from the issue body or the original XPU wrapper revision, because the current
+workspace layout no longer contains the reported wrapper path.

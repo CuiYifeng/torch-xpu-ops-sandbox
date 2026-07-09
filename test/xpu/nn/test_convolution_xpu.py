@@ -1410,6 +1410,11 @@ with XPUPatchForImport(False):
     def skip_cudnn_test(self, *args, **kwargs):
         self.skipTest("This is a cuDNN-specific test not applicable to XPU.")
 
+    def conv_large(self, device):
+        self.skipTest(
+            "XPU: skipped due to fp16 weight gradient divergence across chunked backward."
+        )
+
     TestConvolutionNNDeviceType.test_Conv2d_depthwise_naive_groups = (
         conv2d_depthwise_naive_groups
     )
@@ -1428,6 +1433,7 @@ with XPUPatchForImport(False):
     TestConvolutionNNDeviceType.test_conv3d_64bit_indexing = conv3d_64bit_indexing
     TestConvolutionNNDeviceType.test_conv3d_large_batch_1 = conv3d_large_batch_1
     TestConvolutionNNDeviceType.test_conv_large_batch_1 = conv_large_batch_1
+    TestConvolutionNNDeviceType.test_conv_large = conv_large
     TestConvolutionNNDeviceType.test_conv_large_nosplit = conv_large_nosplit
     TestConvolutionNNDeviceType.test_conv_transposed_large = conv_transposed_large
     TestConvolutionNNDeviceType.test_Conv2d_deterministic_cudnn = (

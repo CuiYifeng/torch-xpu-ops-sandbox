@@ -4,25 +4,28 @@
 
 - Source issue: https://github.com/CuiYifeng/torch-xpu-ops-sandbox/issues/5
 
-### Likely upstream touchpoints
-
-- `pytorch/test/test_scatter_gather_ops.py`: CUDA-only device property queries
-  are used in scatter-add override coverage.
-- `pytorch/test/nn/test_convolution.py`: the reported slow convolution failure
-  should be re-checked against the current upstream test body because the local
-  file has already drifted from the issue description.
-
 ### Current status
 
-This iteration did not make a pytorch source change. The local workspace does
-not currently provide a runnable torch/XPU environment for direct reproduction
-and validation.
+No pytorch source change was needed on this iteration.
+
+- The reported convolution slice passes locally:
+
+```bash
+cd third_party/torch-xpu-ops/test/xpu
+python -m pytest -sxv nn/test_convolution_xpu.py -k 'test_slow_conv_dilated3d_unbatched'
+```
+
+- The reported indexing slice is stale on the current checkout. Collecting the
+  current XPU wrapper does not expose a `smem_stage_alignment_multi_iter` test.
+
+### Remaining upstream touchpoint
+
+The CUDA-only device property query currently lives in
+`pytorch/test/test_scatter_gather_ops.py`, so any future real fix would likely
+start there if the failure reappears on the relevant release branch.
 
 ### Suggested follow-up
 
-When an environment is available, verify which failing tests are still current,
-then either:
-
-- make the upstream test logic device-agnostic, or
-- override the affected test methods in the XPU wrapper layer with equivalent
-  XPU-safe logic.
+If the issue still matters, re-run it against the original release/2.13 commit
+or the original wrapper revision from the report, then decide between an
+upstream device-agnostic test fix and a local XPU wrapper override.

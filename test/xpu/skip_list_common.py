@@ -182,7 +182,11 @@ skip_dict = {
         # QuantizedXPU is deprecated https://github.com/pytorch/pytorch/pull/173923
         "test_flip_xpu_float32",
     ),
-    "test_sort_and_select_xpu.py": None,
+    "test_sort_and_select_xpu.py": (
+        # CUDA-specific multi-block topk tie-breaking not applicable to XPU
+        # https://github.com/CuiYifeng/torch-xpu-ops-sandbox/issues/22
+        "test_topk_deterministic_tie_breaking_cuda_multiblock_xpu",
+    ),
     "test_sparse_csr_xpu.py": None,
     "test_sparse_xpu.py": None,
     "test_spectral_ops_xpu.py": (

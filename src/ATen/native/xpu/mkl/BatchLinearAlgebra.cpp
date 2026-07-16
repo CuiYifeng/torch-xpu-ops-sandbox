@@ -143,6 +143,31 @@ void mkl_getrs(
 }
 
 template <typename scalar_t>
+void mkl_getrfnp(
+    sycl::queue& queue,
+    int64_t m,
+    int64_t n,
+    scalar_t* a,
+    int64_t lda,
+    int64_t stride_a,
+    int64_t batch_size,
+    scalar_t* scratchpad,
+    int64_t scratchpadsize) {
+  SYCL_ONEMKL_SUBMIT(
+      queue,
+      oneapi::mkl::lapack::getrfnp_batch,
+      queue,
+      m,
+      n,
+      a,
+      lda,
+      stride_a,
+      batch_size,
+      scratchpad,
+      scratchpadsize);
+}
+
+template <typename scalar_t>
 int64_t mkl_getrf_scratchpad(
     sycl::queue& queue,
     int64_t m,
@@ -153,6 +178,18 @@ int64_t mkl_getrf_scratchpad(
     int64_t batch_size) {
   return oneapi::mkl::lapack::getrf_batch_scratchpad_size<scalar_t>(
       queue, m, n, lda, stride_a, stride_ipiv, batch_size);
+}
+
+template <typename scalar_t>
+int64_t mkl_getrfnp_scratchpad(
+    sycl::queue& queue,
+    int64_t m,
+    int64_t n,
+    int64_t lda,
+    int64_t stride_a,
+    int64_t batch_size) {
+  return oneapi::mkl::lapack::getrfnp_batch_scratchpad_size<scalar_t>(
+      queue, m, n, lda, stride_a, batch_size);
 }
 
 template <typename scalar_t>
@@ -211,6 +248,39 @@ static void apply_lu_xpu_(
         stride_a,
         ipiv,
         stride_ipiv,
+        batch_size,
+        reinterpret_cast<scalar_t*>(scratchpad_at.data_ptr()),
+        scratchpadsize);
+  } catch (const oneapi::mkl::lapack::batch_error& be) {
+    error_handle(info_data, be);
+  }
+}
+
+template <typename scalar_t>
+static void apply_lu_nopivot_xpu_(
+    const Tensor& self_,
+    int32_t* info_data) {
+  if (self_.numel() == 0)
+    return;
+
+  auto& queue = at::xpu::getCurrentSYCLQueue();
+  int64_t batch_size = native::batchCount(self_);
+  int64_t m = self_.size(-2);
+  int64_t n = self_.size(-1);
+  int64_t lda = m;
+  int64_t stride_a = lda * n;
+  scalar_t* a = reinterpret_cast<scalar_t*>(self_.data_ptr());
+  int64_t scratchpadsize = mkl_getrfnp_scratchpad<scalar_t>(
+      queue, m, n, lda, stride_a, batch_size);
+  Tensor scratchpad_at = at::empty({scratchpadsize}, self_.options());
+  try {
+    mkl_getrfnp<scalar_t>(
+        queue,
+        m,
+        n,
+        a,
+        lda,
+        stride_a,
         batch_size,
         reinterpret_cast<scalar_t*>(scratchpad_at.data_ptr()),
         scratchpadsize);
@@ -351,49 +421,81 @@ void lu_factor_mkl(
       "torch.lu_factor: Expected tensor with 2 or more dimensions. Got size: ",
       LU.sizes(),
       " instead");
-  TORCH_CHECK(
-      pivot,
-      "linalg.lu_factor: LU without pivoting is not implemented on the XPU");
 
   // handle the info
   Tensor info_ = at::zeros_like(info, Device(at::kCPU));
   int32_t* info_data = info_.data_ptr<int32_t>();
 
-  // oneMKL requires Long for pivots but PyTorch provides Int
-  Tensor pivots_ = at::empty(pivots.sizes(), pivots.options().dtype(kLong));
+  if (pivot) {
+    // oneMKL requires Long for pivots but PyTorch provides Int
+    Tensor pivots_ = at::empty(pivots.sizes(), pivots.options().dtype(kLong));
 
-  AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES(LU.scalar_type(), "lu_xpu", [&] {
-    using T = get_mkl_type<scalar_t>::type;
-    if (!at::isnan(LU).any().item<bool>()) {
-      apply_lu_xpu_<T>(LU, pivots_, info_data);
-    } else {
-      // Has NaN, temporarily replace NaNs to avoid MKL crashes, run batched LU
-      // then restore NaNs for the affected batches.
-      int64_t batch_size = native::batchCount(LU);
-      int64_t m = LU.size(-2);
-      int64_t n = LU.size(-1);
+    AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES(LU.scalar_type(), "lu_xpu", [&] {
+      using T = get_mkl_type<scalar_t>::type;
+      if (!at::isnan(LU).any().item<bool>()) {
+        apply_lu_xpu_<T>(LU, pivots_, info_data);
+      } else {
+        // Has NaN, temporarily replace NaNs to avoid MKL crashes, run batched
+        // LU then restore NaNs for the affected batches.
+        int64_t batch_size = native::batchCount(LU);
+        int64_t m = LU.size(-2);
+        int64_t n = LU.size(-1);
 
-      // Detect NaN per-batch
-      auto nan_mask_batch =
-          at::isnan(LU).reshape({batch_size, m * n}).any(/*dim=*/1);
+        // Detect NaN per-batch
+        auto nan_mask_batch =
+            at::isnan(LU).reshape({batch_size, m * n}).any(/*dim=*/1);
 
-      // Replace NaN batches with identity matrix to avoid MKL crash
-      auto identity = at::eye(m, n, LU.options()).unsqueeze(0);
-      auto nan_mask_expanded = nan_mask_batch.view({batch_size, 1, 1});
-      LU.copy_(at::where(nan_mask_expanded, identity, LU));
+        // Replace NaN batches with identity matrix to avoid MKL crash
+        auto identity = at::eye(m, n, LU.options()).unsqueeze(0);
+        auto nan_mask_expanded = nan_mask_batch.view({batch_size, 1, 1});
+        LU.copy_(at::where(nan_mask_expanded, identity, LU));
 
-      apply_lu_xpu_<T>(LU, pivots_, info_data);
+        apply_lu_xpu_<T>(LU, pivots_, info_data);
 
-      // Restore NaN for batches that originally had NaN
-      LU.masked_fill_(
-          nan_mask_expanded.expand({batch_size, m, n}),
-          create_quiet_nan<scalar_t>());
-    }
-  });
+        // Restore NaN for batches that originally had NaN
+        LU.masked_fill_(
+            nan_mask_expanded.expand({batch_size, m, n}),
+            create_quiet_nan<scalar_t>());
+      }
+    });
 
-  // Copy to original info and pivots tensor
+    // Copy to original pivots tensor
+    pivots.copy_(pivots_);
+  } else {
+    // LU without pivoting using getrfnp
+    AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES(
+        LU.scalar_type(), "lu_nopivot_xpu", [&] {
+          using T = get_mkl_type<scalar_t>::type;
+          if (!at::isnan(LU).any().item<bool>()) {
+            apply_lu_nopivot_xpu_<T>(LU, info_data);
+          } else {
+            int64_t batch_size = native::batchCount(LU);
+            int64_t m = LU.size(-2);
+            int64_t n = LU.size(-1);
+
+            auto nan_mask_batch =
+                at::isnan(LU).reshape({batch_size, m * n}).any(/*dim=*/1);
+
+            auto identity = at::eye(m, n, LU.options()).unsqueeze(0);
+            auto nan_mask_expanded = nan_mask_batch.view({batch_size, 1, 1});
+            LU.copy_(at::where(nan_mask_expanded, identity, LU));
+
+            apply_lu_nopivot_xpu_<T>(LU, info_data);
+
+            LU.masked_fill_(
+                nan_mask_expanded.expand({batch_size, m, n}),
+                create_quiet_nan<scalar_t>());
+          }
+        });
+
+    // Fill pivots with identity permutation (1-indexed: 1, 2, 3, ...)
+    int64_t min_mn = std::min(LU.size(-2), LU.size(-1));
+    pivots.copy_(
+        at::arange(1, min_mn + 1, pivots.options()).expand_as(pivots));
+  }
+
+  // Copy to original info tensor
   info.copy_(info_);
-  pivots.copy_(pivots_);
 }
 
 template <typename T>
